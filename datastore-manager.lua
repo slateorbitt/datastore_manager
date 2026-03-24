@@ -3,7 +3,7 @@
 -- goal: safe, structured player data management without data loss or session conflicts
 -- features: session locking, retry with backoff, schema versioning, auto-save, middleware hooks,
 --           dirty tracking, MessagingService cross-server unlock, request budget awareness
--- written by mohammad.noori (mohammadssoul)
+-- written by slateorbitt (slateorbitt)
 
 --[[
 	how to think about this module
