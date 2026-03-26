@@ -1,145 +1,159 @@
--- DemoServer.lua
--- place in ServerScriptService as a regular Script
--- requires DataManager ModuleScript in the same folder
+-- stress test server demo.
 
-local Players        = game:GetService("Players")
-local DataManager    = require(script.Parent.DataManager)
-
--- manager setup
+local Players = game:GetService("Players")
+local DataManager = require(script.Parent.DataManager)
 
 local manager = DataManager.new({
-	storeName        = "PlayerData_Demo",
-	lockStoreName    = "PlayerData_Locks",
-	schemaVersion    = 2,
+	storeName = "PlayerData_Demo",
+	lockStoreName = "PlayerData_Locks",
+	schemaVersion = 3,
 
 	template = {
-		coins     = 0,
-		level     = 1,
+		coins = 0,
+		level = 1,
 		inventory = {},
-		lastSeen  = 0,
+		lastSeen = 0,
+		loginCount = 0,
 	},
 
-	-- v1 → v2: backfill lastSeen for any old saves
 	migrations = {
 		[1] = function(old)
 			old.lastSeen = 0
 			return old
 		end,
+		[2] = function(old)
+			old.loginCount = 0
+			return old
+		end,
 	},
 
 	autoSaveInterval = 60,
-	lockTimeout      = 30,
-	maxRetries       = 5,
+	lockTimeout = 30,
+	maxRetries = 5,
 
-	-- stamp lastSeen on every write (runs on a copy, doesn't affect live data)
 	onBeforeSave = function(data)
 		data.lastSeen = os.time()
 		return data
 	end,
 
 	onAfterLoad = function(data)
-		print(string.format(
-			"[DataManager] loaded — coins: %d  level: %d  lastSeen: %d",
-			data.coins, data.level, data.lastSeen
-		))
+		data.loginCount += 1
 		return data
 	end,
 
-	-- keeps leaderstats in sync automatically without any manual update calls
-	onKeyChanged = function(userId, key, _old, new)
+	onKeyChanged = function(userId, key, old, new)
 		local player = Players:GetPlayerByUserId(userId)
 		if not player then return end
 		local ls = player:FindFirstChild("leaderstats")
 		if not ls then return end
-		local statName = key == "coins" and "Coins" or key == "level" and "Level" or nil
-		if statName then
-			local stat = ls:FindFirstChild(statName)
+		if key == "coins" then
+			local stat = ls:FindFirstChild("Coins")
+			if stat then stat.Value = new end
+		elseif key == "level" then
+			local stat = ls:FindFirstChild("Level")
 			if stat then stat.Value = new end
 		end
 	end,
 })
 
--- helpers
-
-local function setupLeaderstats(player: Player, profile)
+local function setupLeaderstats(player, profile)
 	local ls = Instance.new("Folder")
-	ls.Name   = "leaderstats"
+	ls.Name = "leaderstats"
 	ls.Parent = player
 
-	local coins      = Instance.new("IntValue")
-	coins.Name       = "Coins"
-	coins.Value      = profile.data.coins
-	coins.Parent     = ls
+	local coins = Instance.new("IntValue")
+	coins.Name = "Coins"
+	coins.Value = profile.data.coins
+	coins.Parent = ls
 
-	local level      = Instance.new("IntValue")
-	level.Name       = "Level"
-	level.Value      = profile.data.level
-	level.Parent     = ls
+	local level = Instance.new("IntValue")
+	level.Name = "Level"
+	level.Value = profile.data.level
+	level.Parent = ls
 end
 
--- coin loop: +10 coins every 15 s, also pushes a timestamped inventory item
--- to demonstrate that nested proxy writes dirty the root key correctly
-local function startCoinLoop(player: Player)
+local function printChangelog(player, profile)
+	local changes = manager:getChangelog(player.UserId)
+	if #changes == 0 then
+		print(string.format("[Changelog] %s - no changes logged", player.Name))
+		return
+	end
+	print(string.format("[Changelog] %s has %d unsaved change(s):", player.Name, #changes))
+	for _, entry in ipairs(changes) do
+		print(string.format("  key=%s  old=%s  new=%s", tostring(entry.key), tostring(entry.oldValue), tostring(entry.newValue)))
+	end
+end
+
+local function runShowcase(player, profile)
 	task.spawn(function()
-		while player.Parent do
-			task.wait(15)
 
-			local p = manager:getProfile(player.UserId)
-			if not p then break end
+		task.wait(3)
+		print(string.format("[Demo] %s login #%d", player.Name, profile.data.loginCount))
+		print(string.format("[Demo] joined with %d coins, level %d, %d inventory items", profile.data.coins, profile.data.level, #profile.data.inventory))
 
-			p.data.coins += 10
+		task.wait(2)
+		profile.data.coins += 50
+		print("[Demo] gave 50 coins via proxy write, leaderstats updated automatically")
+		printChangelog(player, profile)
 
-			local inv = p.data.inventory
-			inv[#inv + 1] = "item_" .. math.floor(os.clock())
+		task.wait(2)
+		local inv = profile.data.inventory
+		inv[#inv + 1] = "sword"
+		inv[#inv + 1] = "shield"
+		inv[#inv + 1] = "potion"
+		print("[Demo] pushed 3 items into nested inventory table, inventory key is now dirty")
+		printChangelog(player, profile)
 
-			print(string.format(
-				"[DataManager] %s +10 coins → %d  |  inventory: %d items",
-				player.Name, p.data.coins, #p.data.inventory
-			))
-		end
+		task.wait(2)
+		profile.data.level += 1
+		print(string.format("[Demo] level up to %d via proxy, leaderstats updated automatically", profile.data.level))
+
+		task.wait(2)
+		profile.data.coins += 25
+		profile.data.coins += 25
+		profile.data.level += 1
+		print("[Demo] two more coin writes + level up, changelog should show all of them:")
+		printChangelog(player, profile)
+
+		task.wait(2)
+		print("[Demo] wiping data back to template defaults...")
+		manager:wipeData(player.UserId)
+		print(string.format("[Demo] after wipe - coins: %d  level: %d  inventory: %d items", profile.data.coins, profile.data.level, #profile.data.inventory))
+
+		task.wait(2)
+		print("[Demo] stats snapshot:")
+		local s = manager:getStats()
+		print(string.format("  loadedProfiles=%d  saves=%d  loads=%d  retries=%d  failedSaves=%d",
+			s.loadedProfiles, s.totalSaves, s.totalLoads, s.totalRetries, s.failedSaves))
+
 	end)
 end
 
--- player lifecycle
-
-Players.PlayerAdded:Connect(function(player)
+local function onPlayerAdded(player)
 	local profile = manager:loadProfile(player.UserId)
 
 	if not profile then
-		-- no profile = no data = kick so they can rejoin cleanly
-		-- keeps them from playing in a stateless session and losing progress
-		player:Kick("Couldn't load your data — please rejoin.")
+		player:Kick("Couldn't load your data, please rejoin.")
 		return
 	end
 
 	setupLeaderstats(player, profile)
-	startCoinLoop(player)
-end)
+	runShowcase(player, profile)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+
+-- handles the case in studio where the player already exists before this script runs
+for _, player in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, player)
+end
 
 Players.PlayerRemoving:Connect(function(player)
 	manager:releaseProfile(player.UserId)
 end)
 
--- flush everyone on server close (~30 s budget from Roblox)
 game:BindToClose(function()
 	for _, player in ipairs(Players:GetPlayers()) do
 		manager:releaseProfile(player.UserId)
-	end
-end)
-
--- stats ticker 
-
-task.spawn(function()
-	while true do
-		task.wait(30)
-		local s = manager:getStats()
-		print(string.format(
-			"[DataManager Stats]  profiles: %d  saves: %d  loads: %d  retries: %d  failedSaves: %d",
-			s.loadedProfiles,
-			s.totalSaves,
-			s.totalLoads,
-			s.totalRetries,
-			s.failedSaves       -- fixed: was named totalFailedSaves in old script
-		))
 	end
 end)
